@@ -1023,68 +1023,6 @@ def dashboard_data_endpoint():
     return response
 
 
-# ============================================================
-# ENDPOINT PÚBLICO SNAPSHOT.JSON - Sin autenticación
-# Consumido directamente por el frontend (dashboard_centralizado.html, income.js)
-# Devuelve el último lote procesado con estructura compatible con hasUsableBankData()
-# ============================================================
-@app.route(
-    "/snapshot.json",
-    methods=["GET"]
-)
-def snapshot_publico():
-    """
-    Devuelve el último lote procesado por Make/excel-parser.
-    SIN AUTENTICACIÓN - acceso público para consumo directo desde navegador.
-
-    Estructura de respuesta compatible con frontend:
-    {
-      "regional": {
-        "GUATEMALA": { "banks": [], "accounts": [], "transactions": [...], ... },
-        "EL_SALVADOR": { "banks": [], "accounts": [], "transactions": [...], ... },
-        "CONSOLIDADO": { ... }
-      },
-      "meta": { "generatedAt": "dd/mm/yyyy HH:MM", "fileCut": "...", ... }
-    }
-
-    Cache-Control: public, max-age=300 (5 min)
-    """
-    # Intentar obtener el último lote finalizado
-    data = cargar_dashboard_data()
-
-    if not tiene_datos_utiles_dashboard(data):
-        # No hay datos disponibles todavía
-        return jsonify({}), 404
-
-    response = jsonify(data)
-
-    # Cache público por 5 minutos para reducir carga en Render
-    response.headers["Cache-Control"] = "public, max-age=300"
-    response.headers["Access-Control-Allow-Origin"] = "*"
-
-    return response
-
-
-# ============================================================
-# ENDPOINT HEALTH CHECK - Para despertar Render
-# ============================================================
-@app.route(
-    "/health",
-    methods=["GET"]
-)
-def health_check():
-    """
-    Health check simple para que el frontend pueda despertar Render
-    antes de consultar endpoints que tardan más (data.json, snapshot.json).
-    """
-    return jsonify({
-        "status": "ok",
-        "service": "excel-parser",
-        "app_build": APP_BUILD,
-        "timestamp": datetime.now().isoformat(timespec="seconds")
-    })
-
-
 @app.route(
     "/dashboard-file",
     methods=["GET"],
