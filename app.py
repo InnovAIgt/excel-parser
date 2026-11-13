@@ -8324,32 +8324,44 @@ def _fusionar_pais(base, nueva):
             return None
         return item.get("key") or item.get("bankKey") or item.get("name")
 
+    def lista(value):
+        return value if isinstance(value, list) else []
+
     def identidad_cuenta(item):
         if not isinstance(item, dict):
             return None
-        num = item.get("number") or item.get("numero") or item.get("id")
+        num = (item.get("original") or item.get("account") or
+               item.get("number") or item.get("numero") or item.get("id"))
         mon = item.get("currency") or item.get("moneda")
+        banco = item.get("bankKey") or item.get("bankCanonical") or item.get("bank")
         if num and mon:
-            return f"{num}|{mon}"
-        return num or item.get("name")
+            return f"{banco}|{num}|{mon}"
+        return f"{banco}|{num}" if num else item.get("name")
 
     def identidad_transaccion(tx):
-        """Clave aproximada para deduplicar transacciones: fecha + descripcion + importe."""
+        """Huella de movimiento compatible con el JSON del dashboard.
+
+        Incluye cuenta, banco y referencia para evitar unir movimientos
+        distintos con la misma fecha e importe.
+        """
         if not isinstance(tx, dict):
             return None
-        fecha = str(tx.get("fecha", "")).strip()
-        desc = str(tx.get("descripcion", "")).strip()
-        debito = tx.get("debito", 0)
-        credito = tx.get("credito", 0)
+        fecha = str(tx.get("date") or tx.get("fecha") or "").strip()
+        desc = str(tx.get("description") or tx.get("descripcion") or "").strip()
+        debito = tx.get("debit", tx.get("debito", 0))
+        credito = tx.get("credit", tx.get("credito", 0))
         try:
             debito = round(float(debito or 0), 2)
             credito = round(float(credito or 0), 2)
         except (TypeError, ValueError):
             pass
-        return f"{fecha}|{desc}|{debito}|{credito}"
+        cuenta = tx.get("original") or tx.get("account") or ""
+        banco = tx.get("bankKey") or tx.get("bank") or ""
+        referencia = tx.get("reference") or tx.get("referencia") or ""
+        return f"{banco}|{cuenta}|{fecha}|{referencia}|{desc}|{debito}|{credito}"
 
     bancos_nuevos = set()
-    for item in nueva.get("banks", []):
+    for item in lista(nueva.get("banks")):
         ident = identidad_banco(item)
         if ident:
             bancos_nuevos.add(ident)
@@ -8361,15 +8373,15 @@ def _fusionar_pais(base, nueva):
 
     banks_combinados = []
 
-    for banco_nuevo in nueva.get("banks", []):
+    for banco_nuevo in lista(nueva.get("banks")):
         ident_banco = identidad_banco(banco_nuevo)
         banco_base = None
-        for b in base.get("banks", []):
+        for b in lista(base.get("banks")):
             if identidad_banco(b) == ident_banco:
                 banco_base = b
                 break
 
-        if banco_base:
+        if banco_base and isinstance(banco_nuevo.get("accounts"), list) and isinstance(banco_base.get("accounts"), list):
             cuentas_nuevas = banco_nuevo.get("accounts", [])
             cuentas_base = banco_base.get("accounts", [])
 
@@ -8439,7 +8451,7 @@ def _fusionar_pais(base, nueva):
         meta_combinada.update(nueva["meta"])
 
     cuentas_nuevas_pais = set()
-    for c in nueva.get("accounts", []):
+    for c in lista(nueva.get("accounts")):
         ident = identidad_cuenta(c)
         if ident:
             cuentas_nuevas_pais.add(ident)
@@ -8449,32 +8461,60 @@ def _fusionar_pais(base, nueva):
             return []
         return [item for item in arr if identidad_cuenta(item) not in cuentas_nuevas_pais]
 
-    txs_base_pais = base.get("transactions", []) or []
-    txs_nueva_pais = nueva.get("transactions", []) or []
-    txs_base_pais_ids = set()
-    for tx in txs_base_pais:
-        tid = identidad_transaccion(tx)
-        if tid:
-            txs_base_pais_ids.add(tid)
-    txs_combinadas_pais = list(txs_base_pais)
-    for tx in txs_nueva_pais:
-        tid = identidad_transaccion(tx)
-        if tid and tid not in txs_base_pais_ids:
-            txs_combinadas_pais.append(tx)
-            txs_base_pais_ids.add(tid)
+    txs_base_pais = lista(base.get("transactions"))
+    txs_nueva_pais = lista(nueva.get("transactions"))
 
-    return {
-        **base,
-        **nueva,
-        "meta": meta_combinada,
-        "banks": banks_combinados,
-        "accounts": [
-            *nueva.get("accounts", []),
-            *conservar_cuentas_pais(base.get("accounts", []))
-        ],
-        "transactions": txs_combinadas_pais,
-        "daily": nueva.get("daily") if isinstance(nueva.get("daily"), list) and nueva.get("daily") else base.get("daily", [])
-    }
+    # Cada Excel bancario se vuelve a exportar con el MES acumulado. Por eso
+    # reemplazamos íntegramente ese mes y conservamos los meses anteriores:
+    # sumar la exportación de hoy a la de ayer duplicaría ingresos.
+    def mes_de(tx):
+        valor = str((tx or {}).get("date") or (tx or {}).get("fecha") or "").strip()
+        if len(valor) >= 7 and valor[4] == "-" and valor[:4].isdigit():
+            return valor[:7]
+        return None
+
+    meses_nuevos = {mes_de(t) for t in txs_nueva_pais if mes_de(t)}
+    # Si el origen no informa fechas válidas, NO hacer un reemplazo incierto.
+    if txs_nueva_pais and len(meses_nuevos) == 0:
+        raise ValueError("No hay fechas ISO en los movimientos del lote entrante")
+    if any(mes_de(t) is None for t in txs_nueva_pais):
+        raise ValueError("El lote entrante contiene movimientos sin mes verificable")
+
+    txs_combinadas_pais = [
+        t for t in txs_base_pais if mes_de(t) not in meses_nuevos
+    ] + txs_nueva_pais
+    txs_combinadas_pais.sort(key=lambda t: str(t.get("date") or t.get("fecha") or ""))
+
+    # Reconstruir bancos, cuentas, saldos, totales y flujo diario A PARTIR
+    # del histórico combinado. Mezclar resúmenes antiguos con movimientos
+    # nuevos producía tarjetas inconsistentes y sumatorias de meses distintos.
+    if not txs_combinadas_pais:
+        return base
+    transacciones_parser = []
+    for tx in txs_combinadas_pais:
+        transacciones_parser.append({
+            "fecha": tx.get("date") or tx.get("fecha"),
+            "banco": tx.get("bank") or tx.get("banco"),
+            "cuenta": tx.get("original") or tx.get("account") or "N/D",
+            "descripcion": tx.get("description") or tx.get("descripcion") or "",
+            "debito": tx.get("debit", tx.get("debito", 0)),
+            "credito": tx.get("credit", tx.get("credito", 0)),
+            "saldo": tx.get("balance", tx.get("saldo")),
+            "_tiene_saldo": tx.get("balance", tx.get("saldo")) is not None,
+            "pais": tx.get("country") or tx.get("pais"),
+            "moneda": tx.get("currency") or tx.get("moneda") or "N/D",
+            "referencia": tx.get("reference") or tx.get("referencia") or "",
+            "es_cheque": tx.get("isCheck", tx.get("es_cheque", False)),
+            "tipo_cheque": tx.get("checkType") or tx.get("tipo_cheque") or "",
+            "numero_cheque": tx.get("checkNumber") or tx.get("numero_cheque") or "",
+        })
+    resultado = construir_dashboard_data(
+        transacciones_parser,
+        nombre_archivo=(nueva.get("meta") or {}).get("file") or (base.get("meta") or {}).get("file") or "Histórico bancario",
+        incluir_regional=False,
+    )
+    resultado["meta"] = {**meta_combinada, **resultado.get("meta", {})}
+    return resultado
 
 
 def combinar_snapshot_ingresos(base, nueva):
@@ -8502,7 +8542,7 @@ def combinar_snapshot_ingresos(base, nueva):
 
     regional = {}
 
-    for clave in set(regional_base) | set(regional_nueva):
+    for clave in (set(regional_base) | set(regional_nueva)) - {"CONSOLIDADO"}:
         rama_nueva = regional_nueva.get(clave)
         rama_base = regional_base.get(clave)
 
@@ -8521,7 +8561,128 @@ def combinar_snapshot_ingresos(base, nueva):
     combinado = dict(nueva)
     combinado["regional"] = regional
 
+    # El consolidado es una vista derivada de GT y SV. No se fusiona como si
+    # fuera un tercer país, pues repetiría los movimientos de ambos.
+    gt = regional.get("GUATEMALA") or {}
+    sv = regional.get("EL_SALVADOR") or {}
+    meta_actual = (regional_nueva.get("CONSOLIDADO") or {}).get("meta") or {}
+    meta_anterior = (regional_base.get("CONSOLIDADO") or {}).get("meta") or {}
+    tc = meta_actual.get("exchangeRate") or meta_anterior.get("exchangeRate")
+    if gt.get("transactions") and sv.get("transactions"):
+        if tc is None or float(tc) <= 0:
+            raise ValueError("Falta tipo de cambio válido para consolidar GT y SV")
+        tc = float(tc)
+        def convertir_movimiento(item):
+            item = dict(item)
+            for campo in ("debit", "credit", "balance"):
+                if item.get(campo) is not None:
+                    item[campo] = round(float(item[campo]) * tc, 2)
+            item["currency"] = "GTQ"
+            return item
+
+        def convertir_resumen(item):
+            item = dict(item)
+            for campo in ("initial", "final", "credits", "debits", "change", "netFlow"):
+                if item.get(campo) is not None:
+                    item[campo] = round(float(item[campo]) * tc, 2)
+            item["currency"] = "GTQ"
+            return item
+
+        def convertir_dia(item):
+            item = dict(item)
+            for campo in ("credits", "debits", "net"):
+                if item.get(campo) is not None:
+                    item[campo] = round(float(item[campo]) * tc, 2)
+            return item
+
+        dias = {}
+        for dia in list(gt.get("daily") or []) + [convertir_dia(d) for d in (sv.get("daily") or [])]:
+            fecha = dia.get("date")
+            if not fecha:
+                continue
+            if fecha not in dias:
+                dias[fecha] = {"date": fecha, "label": dia.get("label", ""),
+                               "credits": 0, "debits": 0, "net": 0, "moves": 0}
+            for campo in ("credits", "debits", "net", "moves"):
+                dias[fecha][campo] += float(dia.get(campo) or 0)
+
+        gt_totales = gt.get("totals") or {}
+        sv_totales = sv.get("totals") or {}
+        claves = ("initial", "final", "credits", "debits", "change", "netFlow")
+        regional["CONSOLIDADO"] = {
+            "meta": {"country": "CONSOLIDADO", "currency": "GTQ", "exchangeRate": tc},
+            "totals": {
+                k: round(float(gt_totales.get(k) or 0) + tc * float(sv_totales.get(k) or 0), 2)
+                for k in claves
+            },
+            "transactions": list(gt["transactions"]) + [convertir_movimiento(t) for t in sv["transactions"]],
+            "banks": list(gt.get("banks") or []) + [convertir_resumen(b) for b in (sv.get("banks") or [])],
+            "accounts": list(gt.get("accounts") or []) + [convertir_resumen(a) for a in (sv.get("accounts") or [])],
+            "daily": [dias[k] for k in sorted(dias)],
+        }
+    else:
+        regional["CONSOLIDADO"] = regional_nueva.get("CONSOLIDADO") or regional_base.get("CONSOLIDADO")
+
+    # La raíz también es utilizada por consumidores anteriores del dashboard.
+    # Si solo llega Guatemala, no debe quedar con 137 movimientos mientras
+    # regional conserva correctamente los 557 históricos más noviembre.
+    paises = [regional.get("GUATEMALA") or {}, regional.get("EL_SALVADOR") or {}]
+    combinado["transactions"] = [
+        tx for pais in paises for tx in (pais.get("transactions") or [])
+    ]
+    combinado["banks"] = [
+        banco for pais in paises for banco in (pais.get("banks") or [])
+    ]
+    combinado["accounts"] = [
+        cuenta for pais in paises for cuenta in (pais.get("accounts") or [])
+    ]
+    meta = dict(combinado.get("meta") or {})
+    meta["movementCount"] = len(combinado["transactions"])
+    meta["banks"] = len(combinado["banks"])
+    meta["accounts"] = len(combinado["accounts"])
+    meta["countries"] = [
+        {"key": clave, "label": "Guatemala" if clave == "GUATEMALA" else "El Salvador",
+         "movementCount": len((regional.get(clave) or {}).get("transactions") or []),
+         "banks": len((regional.get(clave) or {}).get("banks") or []),
+         "accounts": len((regional.get(clave) or {}).get("accounts") or []),
+         "currency": "GTQ" if clave == "GUATEMALA" else "USD"}
+        for clave in ("GUATEMALA", "EL_SALVADOR")
+        if (regional.get(clave) or {}).get("transactions")
+    ]
+    meta["mixedCountries"] = len(meta["countries"]) > 1
+    meta["currency"] = "MULTI" if meta["mixedCountries"] else (
+        meta["countries"][0]["currency"] if meta["countries"] else "N/D"
+    )
+    combinado["meta"] = meta
+
     return combinado
+
+
+def cargar_historico_publicado_en_html():
+    """Recupera el último histórico compartido, incluso si Render reinició.
+
+    Es el respaldo de arranque más fiable cuando snapshot.json está vacío.
+    Nunca se inventan movimientos ni se continúa si falta este respaldo.
+    """
+    token = str(os.environ.get(PUBLISH_TOKEN_ENV, "") or "").strip()
+    repo = str(os.environ.get(PUBLISH_REPO_ENV, "") or "").strip()
+    branch = str(os.environ.get(PUBLISH_BRANCH_ENV, "") or "develop").strip()
+    path = str(os.environ.get(PUBLISH_PATH_ENV, "") or PUBLISH_DEFAULT_PATH).strip().lstrip("/")
+    if not token or not repo:
+        return None
+    try:
+        url = ("https://api.github.com/repos/" + repo + "/contents/" +
+               urllib.parse.quote(path) + "?ref=" + urllib.parse.quote(branch))
+        html = _github_request(url, token, raw=True)
+        marker = "window.DASHBOARD_BASE_DATA = "
+        start = html.find(marker)
+        if start < 0:
+            return None
+        data, _ = json.JSONDecoder().raw_decode(html[start + len(marker):].lstrip())
+        return data if tiene_datos_utiles_dashboard(data) else None
+    except Exception as error:
+        print("No se pudo recuperar el histórico del HTML:", str(error))
+        return None
 
 def publicar_snapshot_ingresos(data):
     """
@@ -9728,6 +9889,19 @@ def finalize_batch():
             )
         )
 
+        # Primero recuperar el histórico que hoy ven los usuarios. Publicar
+        # directamente dashboard_payload borraría el país/mes ausente del lote.
+        base_historica = cargar_historico_publicado_en_html()
+        if not tiene_datos_utiles_dashboard(base_historica):
+            return jsonify({
+                "success": False,
+                "error": "Publicación bloqueada: no se pudo recuperar el histórico compartido"
+            }), 409
+        try:
+            dashboard_payload = combinar_snapshot_ingresos(base_historica, dashboard_payload)
+        except (ValueError, TypeError) as error:
+            return jsonify({"success": False, "error": str(error)}), 409
+
         # Mantener también el dashboard global para compatibilidad.
         guardar_dashboard_data(
             dashboard_payload
@@ -9737,13 +9911,27 @@ def finalize_batch():
             dashboard_payload
         )
 
-        publicar_backup_json(
+        resultado_backup = publicar_backup_json(
             dashboard_payload
         )
 
-        publicar_snapshot_ingresos(
+        resultado_snapshot = publicar_snapshot_ingresos(
             dashboard_payload
         )
+
+        if not all(r.get("published") for r in (
+            publicacion, resultado_backup, resultado_snapshot
+        )):
+            return jsonify({
+                "success": False,
+                "error": "Publicación incompleta; revisar destinos antes de reintentar",
+                "publication": {
+                    "html": publicacion,
+                    "backup": resultado_backup,
+                    "snapshot": resultado_snapshot,
+                },
+                "batch_id": batch_id,
+            }), 502
 
         state["dashboard_payload"] = dashboard_payload
         state["result_path"] = result_path
