@@ -1024,6 +1024,48 @@ def dashboard_data_endpoint():
 
 
 @app.route(
+    "/snapshot.json",
+    methods=["GET"]
+)
+def snapshot_json():
+    """
+    Endpoint público (sin API key) que sirve el snapshot de ingresos.
+    Usado por el dashboard de Ingresos como fallback cuando la API de Render
+    está dormida o para usuarios que entran en frío.
+    """
+    try:
+        # Intentar cargar desde GitHub (assets/data/ingresos-snapshot.json)
+        token, repo, branch, path = _config_snapshot()
+        if token:
+            try:
+                content_github = _descargar_contenido_github(token, repo, branch, path)
+                data = json.loads(content_github)
+                return jsonify(data)
+            except Exception as e:
+                print(f"[snapshot.json] Error leyendo GitHub: {e}")
+
+        # Fallback: intentar archivo local en disco de Render
+        try:
+            with open("dashboard_data.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return jsonify(data)
+        except Exception:
+            pass
+
+        # Último fallback: estructura vacía válida
+        return jsonify({
+            "regional": {
+                "GUATEMALA": {"banks": [], "accounts": [], "transactions": []},
+                "EL_SALVADOR": {"banks": [], "accounts": [], "transactions": []},
+                "CONSOLIDADO": {"banks": [], "accounts": [], "transactions": []}
+            }
+        })
+    except Exception as e:
+        print(f"[snapshot.json] Error: {e}")
+        return jsonify({"error": "Snapshot no disponible"}), 500
+
+
+@app.route(
     "/dashboard-file",
     methods=["GET"],
     strict_slashes=False
@@ -8266,11 +8308,181 @@ def _descargar_contenido_github(token, repo, branch, path):
     ).decode("utf-8")
 
 
+def _fusionar_pais(base, nueva):
+    """
+    Fusiona la data de un país banco por banco, cuenta por cuenta y transacción por transacción:
+    lo que traiga el origen nuevo se actualiza y lo que no venga se conserva.
+    Los datos nunca se borran. Conserva histórico por país, banco, cuenta y período.
+    """
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(nueva, dict):
+        nueva = {}
+
+    def identidad_banco(item):
+        if not isinstance(item, dict):
+            return None
+        return item.get("key") or item.get("bankKey") or item.get("name")
+
+    def identidad_cuenta(item):
+        if not isinstance(item, dict):
+            return None
+        num = item.get("number") or item.get("numero") or item.get("id")
+        mon = item.get("currency") or item.get("moneda")
+        if num and mon:
+            return f"{num}|{mon}"
+        return num or item.get("name")
+
+    def identidad_transaccion(tx):
+        """Clave aproximada para deduplicar transacciones: fecha + descripcion + importe."""
+        if not isinstance(tx, dict):
+            return None
+        fecha = str(tx.get("fecha", "")).strip()
+        desc = str(tx.get("descripcion", "")).strip()
+        debito = tx.get("debito", 0)
+        credito = tx.get("credito", 0)
+        try:
+            debito = round(float(debito or 0), 2)
+            credito = round(float(credito or 0), 2)
+        except (TypeError, ValueError):
+            pass
+        return f"{fecha}|{desc}|{debito}|{credito}"
+
+    bancos_nuevos = set()
+    for item in nueva.get("banks", []):
+        ident = identidad_banco(item)
+        if ident:
+            bancos_nuevos.add(ident)
+
+    def conservar_bancos(arr):
+        if not isinstance(arr, list):
+            return []
+        return [item for item in arr if identidad_banco(item) not in bancos_nuevos]
+
+    banks_combinados = []
+
+    for banco_nuevo in nueva.get("banks", []):
+        ident_banco = identidad_banco(banco_nuevo)
+        banco_base = None
+        for b in base.get("banks", []):
+            if identidad_banco(b) == ident_banco:
+                banco_base = b
+                break
+
+        if banco_base:
+            cuentas_nuevas = banco_nuevo.get("accounts", [])
+            cuentas_base = banco_base.get("accounts", [])
+
+            cuentas_nuevas_ident = set()
+            for c in cuentas_nuevas:
+                ident = identidad_cuenta(c)
+                if ident:
+                    cuentas_nuevas_ident.add(ident)
+
+            def conservar_cuentas(arr):
+                if not isinstance(arr, list):
+                    return []
+                return [item for item in arr if identidad_cuenta(item) not in cuentas_nuevas_ident]
+
+            cuentas_fusionadas = []
+            for cuenta_nueva in cuentas_nuevas:
+                ident_cuenta = identidad_cuenta(cuenta_nueva)
+                cuenta_base = None
+                for c in cuentas_base:
+                    if identidad_cuenta(c) == ident_cuenta:
+                        cuenta_base = c
+                        break
+
+                if cuenta_base:
+                    txs_base = cuenta_base.get("transactions", []) or []
+                    txs_nueva = cuenta_nueva.get("transactions", []) or []
+
+                    txs_base_ids = set()
+                    for tx in txs_base:
+                        tid = identidad_transaccion(tx)
+                        if tid:
+                            txs_base_ids.add(tid)
+
+                    txs_combinadas = list(txs_base)
+                    for tx in txs_nueva:
+                        tid = identidad_transaccion(tx)
+                        if tid and tid not in txs_base_ids:
+                            txs_combinadas.append(tx)
+                            txs_base_ids.add(tid)
+
+                    cuenta_fusionada = {
+                        **cuenta_base,
+                        **cuenta_nueva,
+                        "transactions": txs_combinadas
+                    }
+                    cuentas_fusionadas.append(cuenta_fusionada)
+                else:
+                    cuentas_fusionadas.append(cuenta_nueva)
+
+            cuentas_fusionadas.extend(conservar_cuentas(cuentas_base))
+
+            banco_fusionado = {
+                **banco_base,
+                **banco_nuevo,
+                "accounts": cuentas_fusionadas
+            }
+            banks_combinados.append(banco_fusionado)
+        else:
+            banks_combinados.append(banco_nuevo)
+
+    banks_combinados.extend(conservar_bancos(base.get("banks", [])))
+
+    meta_combinada = {}
+    if isinstance(base.get("meta"), dict):
+        meta_combinada.update(base["meta"])
+    if isinstance(nueva.get("meta"), dict):
+        meta_combinada.update(nueva["meta"])
+
+    cuentas_nuevas_pais = set()
+    for c in nueva.get("accounts", []):
+        ident = identidad_cuenta(c)
+        if ident:
+            cuentas_nuevas_pais.add(ident)
+
+    def conservar_cuentas_pais(arr):
+        if not isinstance(arr, list):
+            return []
+        return [item for item in arr if identidad_cuenta(item) not in cuentas_nuevas_pais]
+
+    txs_base_pais = base.get("transactions", []) or []
+    txs_nueva_pais = nueva.get("transactions", []) or []
+    txs_base_pais_ids = set()
+    for tx in txs_base_pais:
+        tid = identidad_transaccion(tx)
+        if tid:
+            txs_base_pais_ids.add(tid)
+    txs_combinadas_pais = list(txs_base_pais)
+    for tx in txs_nueva_pais:
+        tid = identidad_transaccion(tx)
+        if tid and tid not in txs_base_pais_ids:
+            txs_combinadas_pais.append(tx)
+            txs_base_pais_ids.add(tid)
+
+    return {
+        **base,
+        **nueva,
+        "meta": meta_combinada,
+        "banks": banks_combinados,
+        "accounts": [
+            *nueva.get("accounts", []),
+            *conservar_cuentas_pais(base.get("accounts", []))
+        ],
+        "transactions": txs_combinadas_pais,
+        "daily": nueva.get("daily") if isinstance(nueva.get("daily"), list) and nueva.get("daily") else base.get("daily", [])
+    }
+
+
 def combinar_snapshot_ingresos(base, nueva):
     """
     Misma regla que combinarDashboardData() en income.js y que
     tools/actualizar-snapshot.mjs: lo nuevo solo reemplaza los países que
-    vengan con datos. Así subir un Excel de Guatemala no borra El Salvador.
+    vienen con datos. Así subir un Excel de Guatemala no borra El Salvador.
+    A nivel de país, fusiona banco por banco, cuenta por cuenta y transacción por transacción.
     """
     if not tiene_datos_utiles_dashboard(nueva):
         return (
@@ -8294,9 +8506,14 @@ def combinar_snapshot_ingresos(base, nueva):
         rama_nueva = regional_nueva.get(clave)
         rama_base = regional_base.get(clave)
 
-        if tiene_datos_utiles_dashboard(rama_nueva):
+        tiene_nueva = tiene_datos_utiles_dashboard(rama_nueva)
+        tiene_base = tiene_datos_utiles_dashboard(rama_base)
+
+        if tiene_nueva and tiene_base:
+            regional[clave] = _fusionar_pais(rama_base, rama_nueva)
+        elif tiene_nueva:
             regional[clave] = rama_nueva
-        elif tiene_datos_utiles_dashboard(rama_base):
+        elif tiene_base:
             regional[clave] = rama_base
         elif rama_nueva or rama_base:
             regional[clave] = rama_nueva or rama_base
@@ -8305,7 +8522,6 @@ def combinar_snapshot_ingresos(base, nueva):
     combinado["regional"] = regional
 
     return combinado
-
 
 def publicar_snapshot_ingresos(data):
     """

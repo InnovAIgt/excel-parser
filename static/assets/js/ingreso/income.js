@@ -3281,64 +3281,16 @@ window.COUNTRY_CURRENCY_VIEW = COUNTRY_CURRENCY_VIEW;
 
 
 // En excel-parser el dashboard y la API comparten origen (el propio servicio
-// Flask): se pide /data.json local en vez del dominio de Render. En producción
-// es la misma URL y, si el endpoint responde 401 o falla, se conserva la data
-// quemada (Jinja) + el snapshot compartido.
-const API_URL = "/data.json";
+// Flask): se pide /snapshot.json local (endpoint público, sin API key).
+const API_URL = "/snapshot.json";
 // Render tarda hasta ~60 s en despertar; con menos se abortaba la carga.
 const API_TIMEOUT_MS = 60000;
 const DASHBOARD_DATA_REFRESH_MS = 5 * 60 * 1000;
 let dashboardDataRefreshTimer = null;
 let dashboardDataLoading = false;
 
-const API_KEY = "REd_1ntE1f0n-0654dfvsdf2214dfAD6F54a6d5F16v5a1s1asd6fa51WRef";
-
 
 async function obtenerDashboard() {
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-  const requestUrl = `${API_URL}?_=${Date.now()}`;
-
-    try {
-
-    const response = await fetch(requestUrl, {
-            method: "GET",
-            headers: {
-                "X-API-Key": API_KEY
-      },
-      signal: controller.signal,
-      cache: 'no-store'
-        });
-
-
-        if (!response.ok) {
-            throw new Error(
-                "Error API: " + response.status
-            );
-        }
-
-
-        const data = await response.json();
-
-        console.log("Datos recibidos:", data);
-
-
-        return data;
-
-
-    } catch(error) {
-
-      const reason = error.name === 'AbortError'
-        ? `tiempo de espera agotado (${API_TIMEOUT_MS / 1000}s)`
-        : error.message;
-      console.warn("No se pudo actualizar el dashboard; se conservan los datos quemados:", reason);
-
-    } finally {
-      clearTimeout(timeout);
-    }
-
-}
 
 // Carga el JSON quemado compartido del repo: sirve aunque el usuario sea
 // nuevo o la API de Render esté dormida/vacía.
