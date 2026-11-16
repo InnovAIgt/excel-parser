@@ -7911,7 +7911,7 @@ PUBLISH_TOKEN_ENV = "DASHBOARD_PUBLISH_TOKEN"
 PUBLISH_REPO_ENV = "DASHBOARD_PUBLISH_REPO"
 PUBLISH_BRANCH_ENV = "DASHBOARD_PUBLISH_BRANCH"
 PUBLISH_PATH_ENV = "DASHBOARD_PUBLISH_PATH"
-PUBLISH_DEFAULT_PATH = "dashboards/ingresos/ingresos.html"
+PUBLISH_DEFAULT_PATH = "public/dashboards/ingresos/ingresos.html"
 
 DATOS_QUEMADOS_RE = re.compile(
     r"(<!-- DATOS_QUEMADOS_INICIO[^>]*-->)(.*?)(<!-- DATOS_QUEMADOS_FIN -->)",
@@ -7923,14 +7923,14 @@ DATOS_QUEMADOS_RE = re.compile(
 # local no existe (o vino vacío), se restaura desde ahí al arrancar.
 # Así /data.json nunca responde vacío y el dashboard no se queda en blanco.
 BACKUP_PATH_ENV = "DASHBOARD_BACKUP_PATH"
-BACKUP_PATH_DEFAULT = "assets/data/excel-parser-backup.json"
+BACKUP_PATH_DEFAULT = "public/assets/data/excel-parser-backup.json"
 BACKUP_REPO_ENV = "DASHBOARD_BACKUP_REPO"
 BACKUP_BRANCH_ENV = "DASHBOARD_BACKUP_BRANCH"
 BACKUP_RAW_URL_ENV = "DASHBOARD_BACKUP_RAW_URL"
 BACKUP_RAW_URL_DEFECTO = (
     "https://raw.githubusercontent.com/"
-    + "Ferr-ZeTA/Prototipado_Dashboard_Intelfon/"
-    + "Ingresos/assets/data/ingresos-snapshot.json"
+    + "InnovAIgt/DASHBOARD_CENTRALIZADO_INTERNO/"
+    + "main/public/assets/data/ingresos-snapshot.json"
 )
 
 # Snapshot de Ingresos que lee el prototipado (data "quemada" visible para
@@ -7940,9 +7940,9 @@ SNAPSHOT_TOKEN_ENV = "INGRESOS_SNAPSHOT_TOKEN"
 SNAPSHOT_REPO_ENV = "INGRESOS_SNAPSHOT_REPO"
 SNAPSHOT_BRANCH_ENV = "INGRESOS_SNAPSHOT_BRANCH"
 SNAPSHOT_PATH_ENV = "INGRESOS_SNAPSHOT_PATH"
-SNAPSHOT_REPO_DEFECTO = "Ferr-ZeTA/Prototipado_Dashboard_Intelfon"
-SNAPSHOT_BRANCH_DEFAULT = "Ingresos"
-SNAPSHOT_PATH_DEFAULT = "assets/data/ingresos-snapshot.json"
+SNAPSHOT_REPO_DEFECTO = "InnovAIgt/DASHBOARD_CENTRALIZADO_INTERNO"
+SNAPSHOT_BRANCH_DEFAULT = "main"
+SNAPSHOT_PATH_DEFAULT = "public/assets/data/ingresos-snapshot.json"
 
 
 def _token_github():
@@ -8154,8 +8154,8 @@ def publicar_datos_quemados(data):
             "reason": "Variables de publicación no configuradas"
         }
 
-    # El dashboard centralizado se despliega desde develop.
-    branch = str(os.environ.get(PUBLISH_BRANCH_ENV, "") or "develop").strip()
+    # El dashboard centralizado de Innova se despliega desde main.
+    branch = str(os.environ.get(PUBLISH_BRANCH_ENV, "") or "main").strip()
     path = str(
         os.environ.get(PUBLISH_PATH_ENV, "")
         or PUBLISH_DEFAULT_PATH
@@ -8666,7 +8666,7 @@ def cargar_historico_publicado_en_html():
     """
     token = str(os.environ.get(PUBLISH_TOKEN_ENV, "") or "").strip()
     repo = str(os.environ.get(PUBLISH_REPO_ENV, "") or "").strip()
-    branch = str(os.environ.get(PUBLISH_BRANCH_ENV, "") or "develop").strip()
+    branch = str(os.environ.get(PUBLISH_BRANCH_ENV, "") or "main").strip()
     path = str(os.environ.get(PUBLISH_PATH_ENV, "") or PUBLISH_DEFAULT_PATH).strip().lstrip("/")
     if not token or not repo:
         return None
